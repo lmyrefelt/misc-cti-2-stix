@@ -9,4 +9,5 @@ Bundle as OpenCTI Connector?
 Automate it using actions/pipelines?
 
 
+# Shout out's and thank you
 Shout out to my brush for helping out!
