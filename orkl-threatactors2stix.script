@@ -1,0 +1,118 @@
+#!/bin/bash
+# script to transform orkl.eu entries to STIX bundle format for import into STIX compatible platforms like OpenCTI
+# This script parses threat actors and converts them into stix "intrusion sets".
+######################################################
+#
+# TODO: Combine this what the list of refernces per actor
+# TODO: OR creat separate stix bundle to get all the external_refs 
+# TODO: Splitt out those intrusion sets named "operation*" into campaigns (?) since it seems more likely they campaign descriptions rather than intrusion sets.
+# Data used orkl.eu api
+# this file only contains threat actor name, alias and "tools and malware" used.
+
+# Since we run this manually at the moment we need something to parse
+# Start with getting an input (file) to parse
+if [ -z $1 ]
+then 
+echo "USAGE: $0 <misp-file>"
+exit 1
+fi
+
+####################### Start parsing data
+# Strip out the tools and malware used as references for threat actors as a stix malware
+cat $1| jq '.data[] as $data | if $data.tools then {type: "malware", spec_version: "2.1", created: $data.created_at, modified: $data.updated_at,malware_types: "unknown", id: "null", name: $data.tools[]} else empty end' | jq -s 'unique_by(.name)' | jq -c '.[]' | sed '/name\":\"\"/d' | sed 's/name\":\"[[:space:]]/name\":\"/g' > orkl_tools.tmp
+
+## Need to filter out for example "living of the land", since these type of tools should be splitt from malicous code.
+## Netstat is yet another example of something that needs to remove but
+# get just the names
+jq '.name' orkl_tools.tmp | sed 's/\"//g'  > orkl_tools.list
+# After this we need to create a uuid mapping between source location and id
+while IFS=$'\n' read -r line; do echo "$line:`uuidgen`"; done < orkl_tools.list > orkl_tools.map
+
+# next step is to add the uuid to the source ( orginiates_from ) country location 
+declare -A id_map
+
+# Read file targets_id.map and populate the associative array with country names and id-strings
+while IFS=: read -r malware id_string; do
+    id_map["$malware"]="$id_string"
+done < orkl_tools.map
+
+# Iterate over file B and replace the pattern "null" after "id": with the id-string
+while IFS=$'\n' read -r line; do
+    for malware in "${!id_map[@]}"; do
+        # Use the country name as a placeholder to find the correct id-string
+        if [[ "$line" == *"$malware"* ]]; then
+            # Replace the pattern "null" after "id": with the id-string
+            line=$(echo "$line" | sed "s/\"id\":\"null\"/\"id\":\"malware--${id_map[$malware]}\"/")
+        fi
+    done
+    echo "$line"
+done < orkl_tools.tmp > orkl_tools.json
+
+# Now we need to create a stix relationship between the location and the intrusion set(s).
+
+cat $1 | jq '.data[] as $data | if $data.tools then {type: "relationship", spec_version: "2.1", id: "relationship--XXX", created: $data.created_at, modified: $data.updated_at, relationship_type: "uses", source_ref: "intrusion-set--\($data.id)", target_ref: $data.tools[]} else empty end' | jq -c '.' | sed '/name\":\"\"/d' | sed 's/name\":\"[[:space:]]/name\":\"/g'  > tool_relation.tmp
+
+# now we need to replace relationship-XXX with relationship-`uuidgen`
+while IFS= read -r line; do
+echo "${line//XXX/$(uuidgen)}"
+done < tool_relation.tmp > s_rel.tmp
+
+# Mapping the relationship object to the target location(s)
+while IFS=: read -r malware id_string; do
+    id_map["$malware"]="$id_string"
+done < orkl_tools.map
+
+# Add the mapping by replacing country with country id
+while IFS=$'\n' read -r line; do
+    for malware in "${!id_map[@]}"; do
+        line=${line//target_ref\":\""$malware"/\target_ref\":\""malware--${id_map[$malware]}"}
+    done
+    echo "$line"
+done < s_rel.tmp > tool_relation.json
+
+
+##########################
+######## Bringing it all together
+#
+# so far we have:
+#  orkl_tools.json = contains the tools/malwares in stix format
+#  tool_relation.json = contains the stix relationship mapped between tolls and intrusion set(s)
+#
+#
+# Add stix bundle header
+echo "{
+\"type\": \"bundle\",
+\"id\": \"bundle--`uuidgen`\",
+\"objects\": [" > orkl_intrusion_sets.json
+
+# Get all the actors
+# create bundle with name, aliases, description, source country and motiviation 
+# TODO: Can i itterate over the key:value and objects instead of needing to print a range - that produces null values ?
+
+
+# The following gets all threat actors and aliases
+cat $1 | jq '.data[] as $data | {spec_verion: "2.1",created: $data.created_at, modified: $data.updated_at, type: "intrusion-set", id: "intrusion-set--\($data.id)", name: $data.main_name, aliases: $data.aliases}' > intrusion_sets2.tmp
+# should also build a external_ref to https://orkl.eu/taEntry/<ThreatActorID>
+
+
+#
+# In atleast one case there is a space \d+ in one of the uuids provided - That something we need to take into account
+#
+# Appending targets to the intrusion set file
+cat source_locations.json >> intrusion_sets2.tmp
+cat source_relation.json >> intrusion_sets2.tmp
+cat target_locations.json >> intrusion_sets2.tmp
+cat target_relation.json >> intrusion_sets2.tmp
+cat sector_identity.json >> intrusion_sets2.tmp
+cat sector_relation.json >> intrusion_sets2.tmp
+
+# Correcting the json structure
+cat intrusion_sets2.tmp | sed -E ':l;N;$!bl; s/}\n\{/},\n\{/g' >> orkl_intrusion_sets.json
+
+
+# add the closing json things
+echo "]
+}" >> orkl_intrusion_sets.json
+
+
+ 
