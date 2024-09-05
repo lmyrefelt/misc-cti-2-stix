@@ -15,6 +15,9 @@ All connected and ready to make use of.
 # Usage
 
 
+# Screens
+
+
 # TO-DO
 Clean code
 Bundle as OpenCTI Connector?
